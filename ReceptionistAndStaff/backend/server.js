@@ -177,6 +177,29 @@ const notificationSchema = new mongoose.Schema({
   }
 });
 
+// Define MongoDB model (Invoice)
+const invoiceSchema = new mongoose.Schema({
+  bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking' },
+  guestName: String,
+  roomNumber: String,
+  roomType: String,
+  roomCategory: String,
+  checkIn: Date,
+  checkOut: Date,
+  duration: Number,
+  billingUnit: String,
+  baseRate: Number,
+  additionalCharges: [{ type: mongoose.Schema.Types.Mixed }],
+  totalAdditionalCharges: Number,
+  totalAmount: Number,
+  status: {
+    type: String,
+    enum: ['generated', 'paid', 'cancelled'],
+    default: 'generated'
+  },
+  generatedAt: Date
+});
+
 // Create models
 const StaffRequest = mongoose.model('StaffRequest', staffRequestSchema);
 const Room = mongoose.model('Room', roomSchema);
@@ -184,6 +207,7 @@ const User = mongoose.model('User', userSchema);
 const Booking = mongoose.model('Booking', bookingSchema);
 const Reservation = mongoose.model('Reservation', reservationSchema);
 const Notification = mongoose.model('Notification', notificationSchema);
+const Invoice = mongoose.model('Invoice', invoiceSchema);
 
 // API endpoint to fetch all staff requests
 app.get('/api/staff-requests', async (req, res) => {
@@ -366,11 +390,10 @@ app.post('/api/rooms/check-out', async (req, res) => {
       return res.status(400).json({ message: `Room ${roomNumber} is not occupied` });
     }
 
-    // Store guest info before clearing it
+    // Store only guest name and room number for checkout summary
     const checkOutData = {
-      guestName: room.guestName,
-      checkOutTime: new Date(),
-      duration: new Date() - room.createdAt
+      Guest: room.guestName,
+      Room: roomNumber
     };
 
     room.status = 'Available';
@@ -454,14 +477,35 @@ app.get('/api/rooms/:roomNumber/status', async (req, res) => {
 // API endpoint to fetch bookings
 app.get('/api/bookings', async (req, res) => {
   try {
-    const { roomNumber, status } = req.query;
+    const { roomNumber, status, sort = 'desc' } = req.query;
     let query = {};
     
     // Add filters if provided
     if (roomNumber) query.roomNumber = roomNumber;
-    if (status) query.status = status;
+    if (status) {
+      if (Array.isArray(status)) {
+        query.status = { $in: status };
+      } else {
+        query.status = status;
+      }
+    }
     
-    const bookings = await Booking.find(query).sort({ createdAt: -1 });
+    const bookings = await Booking.find(query)
+      .sort({ checkIn: sort === 'desc' ? -1 : 1 })
+      .select({
+        bookingId: 1,
+        guestName: 1,
+        email: 1,
+        phone: 1,
+        roomNumber: 1,
+        roomType: 1,
+        checkIn: 1,
+        checkOut: 1,
+        status: 1,
+        paymentStatus: 1,
+        specialRequests: 1
+      });
+
     res.json(bookings);
   } catch (err) {
     console.error('Error fetching bookings:', err);
@@ -469,16 +513,7 @@ app.get('/api/bookings', async (req, res) => {
   }
 });
 
-app.get('/api/bookings', async (req, res) => {
-  try {
-    const bookings = await Booking.find().sort({ createdAt: -1 });
-    res.json(bookings);
-  } catch (err) {
-    console.error('Error fetching bookings:', err);
-    res.status(500).json({ message: 'Error fetching bookings' });
-  }
-});
-
+// Get a specific booking by ID
 app.get('/api/bookings/:id', async (req, res) => {
   try {
     const booking = await Booking.findById(req.params.id);
@@ -492,6 +527,7 @@ app.get('/api/bookings/:id', async (req, res) => {
   }
 });
 
+// Update a booking
 app.patch('/api/bookings/:id', async (req, res) => {
   try {
     const updates = req.body;
@@ -553,35 +589,9 @@ app.patch('/api/bookings/:id', async (req, res) => {
         `${booking.guestName} has checked out from room ${booking.roomNumber}`,
         {
           guestName: booking.guestName,
-          email: booking.email,
-          phone: booking.phone,
-          roomType: booking.roomType,
           roomNumber: booking.roomNumber,
           checkIn: booking.checkIn,
           checkOut: booking.checkOut,
-          paymentStatus: booking.paymentStatus,
-          status: booking.status
-        },
-        'medium',
-        booking._id
-      );
-    }
-    
-    // Create notification for other status changes
-    if (updates.status && updates.status !== 'checked-in' && updates.status !== 'checked-out') {
-      await createNotification(
-        'booking',
-        'Booking Status Update',
-        `Booking for ${booking.guestName} has been ${updates.status}`,
-        {
-          guestName: booking.guestName,
-          email: booking.email,
-          phone: booking.phone,
-          roomType: booking.roomType,
-          roomNumber: booking.roomNumber,
-          checkIn: booking.checkIn,
-          checkOut: booking.checkOut,
-          paymentStatus: booking.paymentStatus,
           status: booking.status
         },
         'medium',
@@ -957,6 +967,111 @@ app.post('/api/login', async (req, res) => {
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Room rate configuration
+const roomRates = {
+  'A': { rate: 3000.00, billingUnit: 'month', category: 'Student Dorm' },
+  'B': { rate: 690.00, billingUnit: 'night', category: 'Single Room' },
+  'C': { rate: 1350.00, billingUnit: 'night', category: 'Double Room' },
+  'D': { rate: 2000.00, billingUnit: 'night', category: 'Family Room' },
+  'E': { rate: 5000.00, billingUnit: 'day', category: 'Event Hall' }
+};
+
+// Generate invoice for a booking
+app.post('/api/invoices/generate', async (req, res) => {
+  try {
+    const { bookingId } = req.body;
+    
+    if (!bookingId) {
+      return res.status(400).json({ message: 'Booking ID is required' });
+    }
+
+    const booking = await Booking.findById(bookingId);
+    if (!booking) {
+      return res.status(404).json({ message: 'Booking not found' });
+    }
+
+    // Get room type and rates
+    const roomType = booking.roomNumber.charAt(0);
+    const { rate, billingUnit, category } = roomRates[roomType];
+
+    // Calculate duration based on billing unit
+    const checkIn = new Date(booking.checkIn);
+    const checkOut = booking.checkOut ? new Date(booking.checkOut) : new Date();
+    let duration;
+
+    if (billingUnit === 'month') {
+      // For monthly rates (student dorm), calculate full months
+      const months = (checkOut.getFullYear() - checkIn.getFullYear()) * 12 + 
+                    (checkOut.getMonth() - checkIn.getMonth());
+      const remainingDays = checkOut.getDate() - checkIn.getDate();
+      duration = months + (remainingDays > 0 ? 1 : 0); // Round up to next month if there are remaining days
+    } else if (billingUnit === 'day') {
+      // For daily rates (event halls), include both check-in and check-out days
+      duration = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24)) + 1;
+    } else {
+      // For nightly rates, calculate nights between check-in and check-out
+      duration = Math.ceil((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+    }
+
+    // Calculate base amount and total
+    const baseAmount = rate * duration;
+    const additionalCharges = booking.additionalCharges || [];
+    const totalAdditionalCharges = additionalCharges.reduce((sum, charge) => sum + (charge.amount || 0), 0);
+    const totalAmount = baseAmount + totalAdditionalCharges;
+
+    // Create invoice
+    const invoice = new Invoice({
+      bookingId: booking._id,
+      guestName: booking.guestName,
+      roomNumber: booking.roomNumber,
+      roomType: category,
+      checkIn: booking.checkIn,
+      checkOut: booking.checkOut || new Date(),
+      duration,
+      billingUnit,
+      baseRate: rate,
+      additionalCharges,
+      totalAdditionalCharges,
+      totalAmount,
+      status: 'generated',
+      generatedAt: new Date()
+    });
+
+    await invoice.save();
+    res.json({ invoice });
+  } catch (error) {
+    console.error('Error generating invoice:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+// API endpoint to get invoice history
+app.get('/api/invoices', async (req, res) => {
+  try {
+    const { roomNumber, guestName, startDate, endDate } = req.query;
+    
+    let query = {};
+    
+    if (roomNumber) query.roomNumber = roomNumber;
+    if (guestName) query.guestName = new RegExp(guestName, 'i');
+    
+    if (startDate || endDate) {
+      query.generatedAt = {};
+      if (startDate) query.generatedAt.$gte = new Date(startDate);
+      if (endDate) query.generatedAt.$lte = new Date(endDate);
+    }
+
+    const invoices = await Invoice.find(query)
+      .sort({ generatedAt: -1 })
+      .limit(100);
+
+    res.json(invoices);
+  } catch (err) {
+    console.error('Error fetching invoices:', err);
+    res.status(500).json({ message: 'Error fetching invoice history' });
   }
 });
 

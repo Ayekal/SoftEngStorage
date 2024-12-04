@@ -91,10 +91,7 @@ async function checkOut() {
         alert(
             `Checkout Summary:\n` +
             `Guest: ${checkOutData.guestName}\n` +
-            `Room: ${roomNumber}\n` +
-            `Check-in: ${new Date(checkOutData.checkInTime).toLocaleString()}\n` +
-            `Check-out: ${new Date(checkOutData.checkOutTime).toLocaleString()}\n` +
-            `Duration: ${hoursStayed} hours`
+            `Room: ${roomNumber}`
         );
 
         roomData[roomNumber] = {
@@ -194,78 +191,61 @@ async function generateInvoice() {
 
     try {
         // Fetch active booking for the room
-        const response = await fetch(`${API_BASE_URL}/bookings?roomNumber=${roomNumber}&status=checked-in`);
+        const response = await fetch(`${API_BASE_URL}/bookings/active?roomNumber=${roomNumber}`);
         if (!response.ok) {
-            throw new Error('Failed to fetch booking data');
+            const error = await response.json();
+            throw new Error(error.message || 'Failed to fetch booking data');
         }
-        const bookings = await response.json();
         
-        // Find the active booking for this room
-        const activeBooking = bookings.find(b => b.roomNumber === roomNumber);
-        
-        if (!activeBooking) {
-            alert('No active booking found for this room');
-            return;
-        }
+        const booking = await response.json();
 
-        // Room rates and periods
-        const roomRates = {
-            'A': { rate: 3000.00, per: 'month' },  // Student Dorm
-            'B': { rate: 690.00, per: 'night' },   // Single Bedroom
-            'C': { rate: 1350.00, per: 'night' },  // Double Bedroom
-            'D': { rate: 2000.00, per: 'night' },  // Family Room
-            'E': { rate: 5000.00, per: 'day' }     // Event Halls
-        };
+        // Generate invoice using the booking data
+        const invoiceResponse = await fetch(`${API_BASE_URL}/invoices/generate`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ bookingId: booking._id })
+        });
 
-        const roomType = roomNumber.charAt(0);
-        const { rate, per } = roomRates[roomType];
-
-        // Calculate duration based on check-in and check-out dates
-        const checkInTime = new Date(activeBooking.checkIn);
-        const checkOutTime = new Date(activeBooking.checkOut);
-        
-        // Set times to midnight for accurate day calculation
-        checkInTime.setHours(0, 0, 0, 0);
-        checkOutTime.setHours(0, 0, 0, 0);
-        
-        let timeDiff = checkOutTime - checkInTime;
-        let duration;
-
-        if (per === 'month') {
-            // For monthly rates, calculate full months
-            const months = (checkOutTime.getFullYear() - checkInTime.getFullYear()) * 12 + 
-                          (checkOutTime.getMonth() - checkInTime.getMonth());
-            const remainingDays = checkOutTime.getDate() - checkInTime.getDate();
-            duration = months + (remainingDays > 0 ? 1 : 0); // Round up to next month if there are remaining days
-        } else if (per === 'day') {
-            // For daily rates (event halls), include both check-in and check-out days
-            duration = Math.ceil(timeDiff / (1000 * 60 * 60 * 24)) + 1;
-        } else {
-            // For nightly rates, calculate nights between check-in and check-out
-            duration = Math.ceil(timeDiff / (1000 * 60 * 60 * 24));
+        if (!invoiceResponse.ok) {
+            const error = await invoiceResponse.json();
+            throw new Error(error.message || 'Failed to generate invoice');
         }
 
-        const totalAmount = rate * duration;
+        const { invoice } = await invoiceResponse.json();
 
-        // Format the invoice
-        const invoice = 
-            `Invoice for Room ${roomNumber}\n` +
+        // Format the invoice for display
+        const invoiceText = 
+            `Invoice for Room ${invoice.roomNumber}\n` +
             `----------------------------\n` +
-            `Booking ID: ${activeBooking.bookingId}\n` +
-            `Guest: ${activeBooking.guestName}\n` +
-            `Check-in: ${checkInTime.toLocaleString()}\n` +
-            `Check-out: ${checkOutTime.toLocaleString()}\n` +
-            `Duration: ${duration} ${per}${duration > 1 ? 's' : ''}\n` +
-            `Rate: ₱${rate.toLocaleString('en-PH')}/${per}\n` +
-            `Total Amount: ₱${totalAmount.toLocaleString('en-PH')}\n` +
-            `----------------------------\n` +
-            `Note: For Student Dorm, any partial month is counted as a full month.\n` +
-            `For Event Halls, both check-in and check-out days are included in the duration.`;
+            `Guest: ${invoice.guestName}\n` +
+            `Room Type: ${invoice.roomType}\n` +
+            `Check-in: ${new Date(invoice.checkIn).toLocaleString()}\n` +
+            `Check-out: ${new Date(invoice.checkOut).toLocaleString()}\n` +
+            `Duration: ${invoice.duration} ${invoice.billingUnit}${invoice.duration > 1 ? 's' : ''}\n` +
+            `Base Rate: ₱${invoice.baseRate.toLocaleString('en-PH')}/${invoice.billingUnit}\n` +
+            `Base Amount: ₱${(invoice.baseRate * invoice.duration).toLocaleString('en-PH')}\n`;
 
-        alert(invoice);
+        // Add additional charges if any
+        if (invoice.additionalCharges && invoice.additionalCharges.length > 0) {
+            invoiceText += `\nAdditional Charges:\n`;
+            invoice.additionalCharges.forEach(charge => {
+                invoiceText += `${charge.description}: ₱${charge.amount.toLocaleString('en-PH')}\n`;
+            });
+            invoiceText += `Total Additional Charges: ₱${invoice.totalAdditionalCharges.toLocaleString('en-PH')}\n`;
+        }
+
+        invoiceText += 
+            `----------------------------\n` +
+            `Total Amount: ₱${invoice.totalAmount.toLocaleString('en-PH')}\n` +
+            `----------------------------\n` +
+            `Generated: ${new Date(invoice.generatedAt).toLocaleString()}`;
+
+        alert(invoiceText);
     } catch (error) {
         console.error('Error generating invoice:', error);
-        alert('Failed to generate invoice. Please try again.');
+        alert(error.message || 'Failed to generate invoice. Please try again.');
     }
 }
 
