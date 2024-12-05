@@ -379,6 +379,7 @@ app.post('/api/rooms/check-out', async (req, res) => {
       return res.status(400).json({ message: 'Room number is required' });
     }
 
+    // First find the room to get current guest name
     const room = await Room.findOne({ roomNumber });
     
     if (!room) {
@@ -390,16 +391,30 @@ app.post('/api/rooms/check-out', async (req, res) => {
       return res.status(400).json({ message: `Room ${roomNumber} is not occupied` });
     }
 
-    // Store only guest name and room number for checkout summary
+    // Find the latest booking for this room and guest
+    const booking = await Booking.findOne({
+      roomNumber: roomNumber,
+      guestName: room.guestName,
+      status: 'checked-in'
+    }).sort({ checkIn: -1 });
+
+    // Store checkout data
     const checkOutData = {
-      Guest: room.guestName,
-      Room: roomNumber
+      guestName: room.guestName,
+      roomNumber: roomNumber
     };
 
+    // Update room status
     room.status = 'Available';
     room.guestName = '';
-    
     await room.save();
+
+    // Update booking status if found
+    if (booking) {
+      booking.status = 'checked-out';
+      await booking.save();
+    }
+
     res.json(checkOutData);
   } catch (err) {
     console.error('Error during check-out:', err);

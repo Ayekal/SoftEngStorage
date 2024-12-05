@@ -86,12 +86,11 @@ async function checkOut() {
         }
 
         const checkOutData = await response.json();
-        const hoursStayed = Math.ceil(checkOutData.duration / (1000 * 60 * 60));
 
         alert(
             `Checkout Summary:\n` +
-            `Guest: ${checkOutData.guestName}\n` +
-            `Room: ${roomNumber}`
+            `Guest Name: ${checkOutData.guestName}\n` +
+            `Room Number: ${checkOutData.roomNumber}`
         );
 
         roomData[roomNumber] = {
