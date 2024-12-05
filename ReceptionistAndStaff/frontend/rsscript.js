@@ -211,22 +211,38 @@ async function generateInvoice() {
         const checkInTime = new Date(booking.checkIn);
         const checkOutTime = booking.checkOut ? new Date(booking.checkOut) : new Date();
         
-        // Calculate duration in nights
-        const durationInMs = checkOutTime - checkInTime;
-        const nights = Math.ceil(durationInMs / (1000 * 60 * 60 * 24));
-        
-        // Get room rate based on room type
-        const roomRates = {
-            'A': 3000, // Student Dorm (monthly)
-            'B': 690,  // Single Bedroom (nightly)
-            'C': 1350, // Double Bedroom (nightly)
-            'D': 2000, // Family Room (nightly)
-            'E': 5000  // Event Hall (daily)
-        };
-        
         const roomType = roomNumber.charAt(0);
-        const rate = roomRates[roomType] || 690; // Default to single room rate if type not found
-        const totalAmount = rate * nights;
+        const roomRates = {
+            'A': { rate: 3000, per: 'month' },  // Student Dorm
+            'B': { rate: 690, per: 'night' },   // Single Bedroom
+            'C': { rate: 1350, per: 'night' },  // Double Bedroom
+            'D': { rate: 2000, per: 'night' },  // Family Room
+            'E': { rate: 5000, per: 'day' }     // Event Hall
+        };
+
+        const { rate, per } = roomRates[roomType] || roomRates['B'];
+        let duration, totalAmount, durationText;
+
+        if (per === 'month') {
+            // For Student Dorm - calculate months
+            const months = (checkOutTime.getFullYear() - checkInTime.getFullYear()) * 12 + 
+                          (checkOutTime.getMonth() - checkInTime.getMonth());
+            const remainingDays = checkOutTime.getDate() - checkInTime.getDate();
+            duration = months + (remainingDays > 0 ? 1 : 0); // Round up for partial months
+            durationText = `${duration} month${duration !== 1 ? 's' : ''}`;
+        } else if (per === 'day') {
+            // For Event Halls - include both check-in and check-out days
+            const durationInMs = checkOutTime - checkInTime;
+            duration = Math.ceil(durationInMs / (1000 * 60 * 60 * 24)) + 1;
+            durationText = `${duration} day${duration !== 1 ? 's' : ''}`;
+        } else {
+            // For hotel rooms (nightly rates)
+            const durationInMs = checkOutTime - checkInTime;
+            duration = Math.ceil(durationInMs / (1000 * 60 * 60 * 24));
+            durationText = `${duration} night${duration !== 1 ? 's' : ''}`;
+        }
+
+        totalAmount = rate * duration;
 
         // Format dates (MM/DD/YYYY)
         const formatDate = (date) => {
@@ -239,14 +255,15 @@ async function generateInvoice() {
 
         // Generate invoice with the specified format
         const invoice = 
-            `Invoice for Room ${roomNumber}\n` +
-            `---------------------------\n\n` +
-            `Booking ID: ${booking._id}\n` +
-            `Guest: ${booking.guestName}\n` +
-            `Check-in: ${formatDate(checkInTime)}\n` +
-            `Check-out: ${formatDate(checkOutTime)}\n` +
-            `Duration: ${nights} night${nights !== 1 ? 's' : ''}\n` +
-            `Rate: ₱${rate}/night\n` +
+            `HOTEL INVOICE\n` +
+            `=============\n\n` +
+            `Booking ID: ${booking.bookingId}\n` +
+            `Room: ${roomNumber} (${roomType})\n` +
+            `Guest: ${booking.guestName}\n\n` +
+            `Check-in:  ${formatDate(checkInTime)}\n` +
+            `Check-out: ${formatDate(checkOutTime)}\n\n` +
+            `Duration: ${durationText}\n` +
+            `Rate: ₱${rate.toLocaleString('en-PH')}/${per}\n` +
             `Total Amount: ₱${totalAmount.toLocaleString('en-PH')}`;
 
         // Display the invoice
